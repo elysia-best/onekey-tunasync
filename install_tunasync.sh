@@ -303,6 +303,47 @@ function remove_task_or_worker() {
     fi
 }
 
+function uninstall_env() {
+    echo "================卸载 Tunasync================"
+    read -p "警告：将停止服务并删除应用文件、服务，确认卸载吗？(y/N): " confirm_uninstall
+    if [[ ! "$confirm_uninstall" =~ ^[Yy]$ ]]; then
+        echo "已取消卸载。"
+        return
+    fi
+
+    echo "1. 停止并禁用 systemd 服务..."
+    systemctl stop tunasync-worker 2>/dev/null
+    systemctl stop tunasync-manager 2>/dev/null
+    systemctl disable tunasync-worker 2>/dev/null
+    systemctl disable tunasync-manager 2>/dev/null
+
+    echo "2. 删除 systemd 服务配置文件..."
+    rm -f /etc/systemd/system/tunasync-manager.service
+    rm -f /etc/systemd/system/tunasync-worker.service
+    systemctl daemon-reload
+
+    echo "3. 删除 Tunasync 二进制文件..."
+    rm -f ${BIN_DIR}/tunasync
+    rm -f ${BIN_DIR}/tunasynctl
+    rm -f ${BIN_DIR}/tunasyncctl
+
+    echo "4. 删除配置文件目录 (${CONF_DIR})..."
+    rm -rf ${CONF_DIR}
+
+    read -p "是否同时删除日志 (${LOG_DIR}) 与用户? (y/N): " rm_logs
+    if [[ "$rm_logs" =~ ^[Yy]$ ]]; then
+        rm -rf ${LOG_DIR}
+        userdel ${RUN_USER} 2>/dev/null
+        groupdel ${RUN_GROUP} 2>/dev/null
+    fi
+
+    echo "-------------------------------------------------------"
+    echo "卸载完成！本脚本*没有*自动删除您的镜像数据存储目录："
+    echo "  ${MIRROR_DIR}"
+    echo "如需彻底清理镜像数据，请手动执行: rm -rf ${MIRROR_DIR}"
+    echo "-------------------------------------------------------"
+}
+
 function show_menu() {
     while true; do
         echo ""
@@ -314,15 +355,17 @@ function show_menu() {
         echo "  3) 查看当前 Worker 与任务状态"
         echo "  4) 手动触发执行一次镜像同步活动"
         echo "  5) 停用删除特定镜像任务 或 注销 Worker"
+        echo "  6) 卸载 Tunasync 并清理环境"
         echo "  0) 退出"
         echo "==========================================="
-        read -p "请选择操作 [0-5]: " option
+        read -p "请选择操作 [0-6]: " option
         case "$option" in
             1) install_env ;;
             2) add_mirror ;;
             3) manage_workers ;;
             4) manual_sync ;;
             5) remove_task_or_worker ;;
+            6) uninstall_env ;;
             0)
                 echo "退出，再见！"
                 exit 0
