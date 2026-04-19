@@ -1,9 +1,7 @@
 #!/bin/bash
 # ==================================================
-# tunasync 一键安装与配置脚本 (适用 Debian/Ubuntu)
+# tunasync 引导式安装与管理脚本
 # ==================================================
-
-set -e
 
 # ================= 配置变量 =================
 RUN_USER="tuansyncer"
@@ -13,88 +11,89 @@ LOG_DIR="/data/log"
 CONF_DIR="/etc/tunasync"
 BIN_DIR="/usr/local/bin"
 
-echo "开始安装 tunasync..."
-
 # 1. 检查 root 权限
 if [ "$EUID" -ne 0 ]; then
   echo "请使用 root 用户运行此脚本！"
   exit 1
 fi
 
-# 2. 安装必要依赖
-echo "正在安装必要依赖 (curl, wget, jq, ca-certificates)..."
-apt-get update -y
-apt-get install -y curl wget jq ca-certificates rsync
-
-# 3. 创建用户与用户组
-echo "正在创建用户组 ${RUN_GROUP} 和用户 ${RUN_USER}..."
-if ! getent group "${RUN_GROUP}" >/dev/null; then
-    groupadd "${RUN_GROUP}"
-fi
-if ! getent passwd "${RUN_USER}" >/dev/null; then
-    useradd -r -s /bin/bash -g "${RUN_GROUP}" -d "${MIRROR_DIR}" "${RUN_USER}"
-fi
-
-# 4. 创建目录并设置权限
-echo "正在创建数据和日志目录..."
-mkdir -p "${MIRROR_DIR}"
-mkdir -p "${LOG_DIR}"
-mkdir -p "${CONF_DIR}"
-
-chown -R ${RUN_USER}:${RUN_GROUP} "${MIRROR_DIR}"
-chown -R ${RUN_USER}:${RUN_GROUP} "${LOG_DIR}"
-# 给目录设置组可读写执行的权限
-chmod -R 775 "${MIRROR_DIR}"
-chmod -R 775 "${LOG_DIR}"
-
-# 5. 获取并下载最新版 tunasync 二进制文件
-echo "正在从 GitHub 获取 tunasync 最新版本..."
-# 获取最新 release 的下载链接
-RELEASE_DATA=$(curl -s https://api.github.com/repos/tuna/tunasync/releases/latest)
-DOWNLOAD_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("linux-amd64-bin.tar.gz$|linux-amd64.tar.gz$")) | .browser_download_url' | head -n 1)
-
-if [ -z "$DOWNLOAD_URL" ]; then
-    echo "无法获取到最新的下载链接，请检查网络或 GitHub API 限制。"
-    exit 1
-fi
-
-echo "下载链接: $DOWNLOAD_URL"
-wget -qO /tmp/tunasync.tar.gz "$DOWNLOAD_URL"
-
-echo "正在解压并安装..."
-tar -xzf /tmp/tunasync.tar.gz -C /tmp
-mv /tmp/tunasync ${BIN_DIR}/
-mv /tmp/tunasyncctl ${BIN_DIR}/
-chmod +x ${BIN_DIR}/tunasync ${BIN_DIR}/tunasyncctl
-rm -f /tmp/tunasync.tar.gz
-
-# 6. 生成配置文件
-echo "正在生成 Manager 和 Worker 配置文件..."
-
-# Manager 配置文件
-cat > ${CONF_DIR}/manager.conf <<EOF
+function install_env() {
+    echo "================开始安装 tunasync 运行环境================"
+    
+    echo "正在安装必要依赖..."
+    apt-get update -y
+    apt-get install -y curl wget jq ca-certificates rsync
+    
+    echo "正在创建用户与目录..."
+    if ! getent group "${RUN_GROUP}" >/dev/null; then groupadd "${RUN_GROUP}"; fi
+    if ! getent passwd "${RUN_USER}" >/dev/null; then useradd -r -s /bin/bash -g "${RUN_GROUP}" -d "${MIRROR_DIR}" "${RUN_USER}"; fi
+    
+    mkdir -p "${MIRROR_DIR}" "${LOG_DIR}" "${CONF_DIR}"
+    chown -R ${RUN_USER}:${RUN_GROUP} "${MIRROR_DIR}" "${LOG_DIR}" "${CONF_DIR}"
+    chmod -R 775 "${MIRROR_DIR}" "${LOG_DIR}"
+    
+    echo "正在下载 tunasync 核心组件..."
+    RELEASE_DATA=$(curl -s https://api.github.com/repos/tuna/tunasync/releases/latest)
+    DOWNLOAD_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("linux-amd64-bin.tar.gz$|linux-amd64.tar.gz$")) | .browser_download_url' | head -n 1)
+    
+    if [ -z "$DOWNLOAD_URL" ]; then echo "下载失败！"; return 1; fi
+    
+    wget -qO /tmp/tunasync.tar.gz "$DOWNLOAD_URL"
+    tar -xzf /tmp/tunasync.tar.gz -C /tmp
+    mv /tmp/tunasync ${BIN_DIR}/
+    
+    # 兼容可能存在的不同拼写 tunasyncctl 或 tunasynctl
+    if [ -f "/tmp/tunasynctl" ]; then
+        mv /tmp/tunasynctl ${BIN_DIR}/tunasynctl
+        chmod +x ${BIN_DIR}/tunasync ${BIN_DIR}/tunasynctl
+        ln -sf ${BIN_DIR}/tunasynctl ${BIN_DIR}/tunasyncctl
+    elif [ -f "/tmp/tunasyncctl" ]; then
+        mv /tmp/tunasyncctl ${BIN_DIR}/tunasyncctl
+        chmod +x ${BIN_DIR}/tunasync ${BIN_DIR}/tunasyncctl
+        ln -sf ${BIN_DIR}/tunasyncctl ${BIN_DIR}/tunasynctl
+    fi
+    
+    rm -f /tmp/tunasync.tar.gz
+    
+    echo "配置 Manager 服务..."
+    cat > ${CONF_DIR}/manager.conf <<EOF
 debug = false
-
 [server]
 addr = "127.0.0.1"
 port = 14242
-ssl_cert = ""
-ssl_key = ""
-
 [files]
 db_type = "bolt"
 db_file = "${MIRROR_DIR}/manager.db"
-ca_cert = ""
+EOF
+    
+    cat > /etc/systemd/system/tunasync-manager.service <<EOF
+[Unit]
+Description=TUNA mirrors sync manager
+After=network.target
+
+[Service]
+Type=simple
+User=${RUN_USER}
+Group=${RUN_GROUP}
+ExecStart=${BIN_DIR}/tunasync manager --config ${CONF_DIR}/manager.conf
+Restart=on-failure
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
-# Worker 配置文件
-cat > ${CONF_DIR}/worker.conf <<EOF
+    echo "生成默认 Worker 基础配置..."
+    cat > ${CONF_DIR}/worker.conf <<EOF
 [global]
-name = "main-worker"
-log_dir = "${LOG_DIR}"
+name = "main_worker"
+log_dir = "${LOG_DIR}/{{.Name}}"
 mirror_dir = "${MIRROR_DIR}"
 concurrent = 10
 interval = 120
+
+[docker]
+enable = true
 
 [manager]
 api_base = "http://127.0.0.1:14242"
@@ -113,40 +112,12 @@ listen_port = 16010
 ssl_cert = ""
 ssl_key = ""
 
-# 这是���个演示镜像，后续你可以直接修改这个文件添加更多的镜像同步配置
-[[mirrors]]
-name = "hello-world"
-provider = "command"
-upstream = "https://example.com"
-command = "echo 'tunasync worker is running!'"
-interval = 1440
+# 镜像配置将在此后自动追加...
 EOF
 
-chown -R ${RUN_USER}:${RUN_GROUP} ${CONF_DIR}
+    chown ${RUN_USER}:${RUN_GROUP} ${CONF_DIR}/worker.conf
 
-# 7. 配置 systemd 服务
-echo "正在创建 systemd 服务文件..."
-
-# Manager service
-cat > /etc/systemd/system/tunasync-manager.service <<EOF
-[Unit]
-Description=TUNA mirrors sync manager
-After=network.target
-
-[Service]
-Type=simple
-User=${RUN_USER}
-Group=${RUN_GROUP}
-ExecStart=${BIN_DIR}/tunasync manager --config ${CONF_DIR}/manager.conf
-Restart=on-failure
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Worker service
-cat > /etc/systemd/system/tunasync-worker.service <<EOF
+    cat > /etc/systemd/system/tunasync-worker.service <<EOF
 [Unit]
 Description=TUNA mirrors sync worker
 After=network.target tunasync-manager.service
@@ -164,25 +135,186 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 EOF
 
-# 8. 启动并设置开机自启
-echo "正在加载并启动 systemd 服务..."
-systemctl daemon-reload
-systemctl enable tunasync-manager
-systemctl enable tunasync-worker
-systemctl start tunasync-manager
-systemctl start tunasync-worker
+    systemctl daemon-reload
+    systemctl enable tunasync-manager --now
+    systemctl enable tunasync-worker --now
+    echo "安装完成，Manager 与基础 Worker 已启动！"
+}
 
-echo "=================================================="
-echo "Tunasync 安装完成！"
-echo "- 执行文件目录: /usr/local/bin/tunasync"
-echo "- 配置文件目录: /etc/tunasync/"
-echo "- 数据存储目录: /data/mirrors"
-echo "- 日志存储目录: /data/log"
-echo ""
-echo "检查服务状态："
-echo "  systemctl status tunasync-manager"
-echo "  systemctl status tunasync-worker"
-echo ""
-echo "你可以使用 tunasyncctl 来管理同步任务："
-echo "  tunasyncctl list -p 14242"
-echo "=================================================="
+function add_mirror() {
+    echo "================添加镜像同步任务================"
+    local conf_file="${CONF_DIR}/worker.conf"
+    if [ ! -f "$conf_file" ]; then
+        echo "未找到基础的 worker.conf，请先执行“安装 Tunasync 环境与 Manager 服务”。"
+        return 1
+    fi
+    
+    read -p "请输入要同步的镜像项目名称 (如 debian, centos 等): " mirror_name
+    
+    echo "请选择同步 Provider (1=rsync, 2=command, 默认 1):"
+    read -p "选项 [1-2]: " provider_opt
+    local provider="rsync"
+    if [ "$provider_opt" == "2" ]; then
+        provider="command"
+    fi
+    
+    read -p "请输入同步源的上游地址 (URL, rsync或http): " upstream_url
+    
+    read -p "请输入同步间隔(分钟) (默认 1440): " interval_val
+    interval_val=${interval_val:-1440}
+
+    local command_str=""
+    local docker_image=""
+    if [ "$provider" == "command" ]; then
+        read -p "请输入调用的外部命令或脚本路径: " command_str
+        read -p "是否在 Docker 中运行? 是则输入镜像名(如 tunathu/tunasync-scripts), 否则回车跳过: " docker_image
+    fi
+    
+    # 备份配置文件以防万一
+    cp "${conf_file}" "${conf_file}.bak_$(date +%s)"
+
+    # 追加到 worker.conf
+    cat >> ${conf_file} <<EOF
+
+[[mirrors]]
+name = "${mirror_name}"
+provider = "${provider}"
+upstream = "${upstream_url}"
+interval = ${interval_val}
+EOF
+
+    if [ "$provider" == "command" ]; then
+        echo "command = \"${command_str}\"" >> ${conf_file}
+        if [ -n "$docker_image" ]; then
+            echo "docker_image = \"${docker_image}\"" >> ${conf_file}
+        fi
+    fi
+
+    # 追加示例注释（可用于定制高级用法）
+    cat >> ${conf_file} <<EOF
+
+# =========================================================
+# 【高级配置示例】（根据需要取消注释并修改相应的配置即可生效）
+# retry = 3                       # 失败重试次数
+# timeout = 120                   # 超时时间(分钟)
+# role = "master"                 # 同步角色 (master 或 slave)
+# use_ipv4 = true                 # 强制使用 IPv4 (常用于 rsync)
+# use_ipv6 = false                # 强制使用 IPv6
+# success_exit_codes = [0, 24]    # 哪些进程退出码视为同步成功
+# exec_on_success = ["/bin/notify_success.sh"]        # 成功时执行钩子
+# exec_on_failure_extra = ["/bin/notify_failure.sh"]  # 失败时执行钩子
+# memory_limit = "512M"           # 内存占用限制 (CGroup功能)
+#
+# 对于 Provider: command 还支持:
+# size_pattern = "size-sum: ([0-9\\\\.]+[KMGTP]?)"
+# fail_on_match = "sync failed error"
+# docker_volumes = ["/etc/ssl:/etc/ssl:ro"]
+#
+# [mirrors.env]                   # 自定义环境变量传给同步脚本
+# CUSTOM_VAR = "value"
+# =========================================================
+EOF
+
+    chown ${RUN_USER}:${RUN_GROUP} ${conf_file}
+    
+    echo "配置已追加至 ${conf_file}。"
+    echo "正在重启 Worker 以应用新配置..."
+    systemctl restart tunasync-worker
+    echo "镜像 [${mirror_name}] 添加成功！"
+}
+
+function manage_workers() {
+    echo "================Worker 状态管理================"
+    echo "当前 Worker 服务运行状态:"
+    systemctl status tunasync-worker --no-pager | head -n 10
+    echo ""
+    echo "使用 tunasyncctl 查看已加载的任务节点详情:"
+    ${BIN_DIR}/tunasyncctl list -p 14242 || echo "tunasyncctl 尚无法获取任务数据"
+    echo "================================================="
+}
+
+function manual_sync() {
+    echo "================手动触发镜像同步================"
+    read -p "请输入相关的 Worker 名称 (敲回车使用默认: main_worker): " worker_name
+    worker_name=${worker_name:-main_worker}
+    
+    read -p "请输入要触发同步的镜像项目名称 (如 debian): " mirror_name
+    
+    if [ -z "$mirror_name" ]; then
+        echo "错误：镜像名称不能为空。"
+        return 1
+    fi
+    
+    echo "正在发送手动触发指令..."
+    ${BIN_DIR}/tunasynctl start -w "${worker_name}" "${mirror_name}" -p 14242
+    echo "触发请求已发送。请稍后使用状态查看选项观察变化。"
+}
+
+function remove_task_or_worker() {
+    echo "================删除配置与回收资源================"
+    echo "  1) 禁用并摘除已加载的镜像任务 (Mirror)"
+    echo "  2) 从主控注销整个 Worker 节点调度"
+    read -p "请选择清理操作 [1-2]: " del_opt
+    
+    read -p "请输入相关的 Worker 名称 (敲回车使用默认: main_worker): " worker_name
+    worker_name=${worker_name:-main_worker}
+    
+    if [ "$del_opt" == "1" ]; then
+        read -p "请输入要摘除的镜像项目名称 (如 debian): " mirror_name
+        if [ -z "$mirror_name" ]; then return 1; fi
+        
+        echo "正在从 Manager 热重载并下线 [${mirror_name}] ..."
+        ${BIN_DIR}/tunasynctl disable -w "${worker_name}" "${mirror_name}" -p 14242
+        ${BIN_DIR}/tunasynctl flush -p 14242
+        ${BIN_DIR}/tunasynctl reload -w "${worker_name}" -p 14242 2>/dev/null
+        
+        echo "-------------------------------------------------------"
+        echo "[重要提示] 热配置与缓存已从内存卸载。"
+        echo "为避免服务下次重新启动时再次读到它，请务必手动编辑配置文件 :"
+        echo "      vim ${CONF_DIR}/worker.conf"
+        echo "并从中直接删除匹配 [[mirrors]] name=\"${mirror_name}\" 的上下内容段落！"
+        echo "-------------------------------------------------------"
+        
+    elif [ "$del_opt" == "2" ]; then
+        echo "正在将该 Worker 从调度主控 (Manager) 中彻底注销..."
+        ${BIN_DIR}/tunasynctl rm-worker -w "${worker_name}" -p 14242
+        echo "注销成功！"
+        echo "注：若为本地主 Worker，请配合执行 'systemctl stop tunasync-worker' 终止后台进程。"
+    else
+        echo "操作已取消。"
+    fi
+}
+
+function show_menu() {
+    while true; do
+        echo ""
+        echo "==========================================="
+        echo "      Tunasync 引导式安装与管理向导"
+        echo "==========================================="
+        echo "  1) 安装 Tunasync 环境与基础 Worker 服务"
+        echo "  2) 向 Worker 添加一个新的镜像同步任务 (Mirror)"
+        echo "  3) 查看当前 Worker 与任务状态"
+        echo "  4) 手动触发执行一次镜像同步活动"
+        echo "  5) 停用删除特定镜像任务 或 注销 Worker"
+        echo "  0) 退出"
+        echo "==========================================="
+        read -p "请选择操作 [0-5]: " option
+        case "$option" in
+            1) install_env ;;
+            2) add_mirror ;;
+            3) manage_workers ;;
+            4) manual_sync ;;
+            5) remove_task_or_worker ;;
+            0)
+                echo "退出，再见！"
+                exit 0
+                ;;
+            *)
+                echo "无效输入，请重新选择"
+                ;;
+        esac
+    done
+}
+
+# 启动菜单
+show_menu
