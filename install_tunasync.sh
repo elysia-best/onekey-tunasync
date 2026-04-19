@@ -21,8 +21,14 @@ function install_env() {
     echo "================开始安装 tunasync 运行环境================"
     
     echo "正在安装必要依赖..."
-    apt-get update -y
-    apt-get install -y curl wget jq ca-certificates rsync
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -y
+        apt-get install -y curl wget jq ca-certificates rsync
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y curl wget jq ca-certificates rsync
+    else
+        echo "未找到受支持的包管理器 (apt-get/yum)，请确保已安装 curl wget jq rsync"
+    fi
     
     echo "正在创建用户与目录..."
     if ! getent group "${RUN_GROUP}" >/dev/null; then groupadd "${RUN_GROUP}"; fi
@@ -55,7 +61,16 @@ function install_env() {
     
     rm -f /tmp/tunasync.tar.gz
     
-    echo "配置 Manager 服务..."
+    echo "配置 Manager 服务与控制台环境..."
+    
+    # Tunasyncctl 配置文件
+    cat > ${CONF_DIR}/ctl.conf <<EOF
+manager_addr = "127.0.0.1"
+manager_port = 14242
+ca_cert = ""
+EOF
+    chown ${RUN_USER}:${RUN_GROUP} ${CONF_DIR}/ctl.conf
+
     cat > ${CONF_DIR}/manager.conf <<EOF
 debug = false
 [server]
@@ -70,12 +85,13 @@ EOF
 [Unit]
 Description=TUNA mirrors sync manager
 After=network.target
+Requires=network.target
 
 [Service]
 Type=simple
 User=${RUN_USER}
 Group=${RUN_GROUP}
-ExecStart=${BIN_DIR}/tunasync manager --config ${CONF_DIR}/manager.conf
+ExecStart=${BIN_DIR}/tunasync manager --config ${CONF_DIR}/manager.conf --with-systemd
 Restart=on-failure
 LimitNOFILE=65536
 
@@ -127,7 +143,9 @@ Requires=tunasync-manager.service
 Type=simple
 User=${RUN_USER}
 Group=${RUN_GROUP}
-ExecStart=${BIN_DIR}/tunasync worker --config ${CONF_DIR}/worker.conf
+PermissionsStartOnly=true
+ExecStart=${BIN_DIR}/tunasync worker --config ${CONF_DIR}/worker.conf --with-systemd
+ExecReload=/bin/kill -SIGHUP \$MAINPID
 Restart=on-failure
 LimitNOFILE=65536
 
@@ -229,7 +247,7 @@ function manage_workers() {
     systemctl status tunasync-worker --no-pager | head -n 10
     echo ""
     echo "使用 tunasyncctl 查看已加载的任务节点详情:"
-    ${BIN_DIR}/tunasyncctl list -p 14242 || echo "tunasyncctl 尚无法获取任务数据"
+    ${BIN_DIR}/tunasyncctl list --all || echo "tunasyncctl 尚无法获取任务数据"
     echo "================================================="
 }
 
@@ -246,7 +264,7 @@ function manual_sync() {
     fi
     
     echo "正在发送手动触发指令..."
-    ${BIN_DIR}/tunasynctl start -w "${worker_name}" "${mirror_name}" -p 14242
+    ${BIN_DIR}/tunasynctl start -w "${worker_name}" "${mirror_name}"
     echo "触发请求已发送。请稍后使用状态查看选项观察变化。"
 }
 
@@ -264,9 +282,9 @@ function remove_task_or_worker() {
         if [ -z "$mirror_name" ]; then return 1; fi
         
         echo "正在从 Manager 热重载并下线 [${mirror_name}] ..."
-        ${BIN_DIR}/tunasynctl disable -w "${worker_name}" "${mirror_name}" -p 14242
-        ${BIN_DIR}/tunasynctl flush -p 14242
-        ${BIN_DIR}/tunasynctl reload -w "${worker_name}" -p 14242 2>/dev/null
+        ${BIN_DIR}/tunasynctl disable -w "${worker_name}" "${mirror_name}"
+        ${BIN_DIR}/tunasynctl flush
+        ${BIN_DIR}/tunasynctl reload -w "${worker_name}" 2>/dev/null
         
         echo "-------------------------------------------------------"
         echo "[重要提示] 热配置与缓存已从内存卸载。"
@@ -277,7 +295,7 @@ function remove_task_or_worker() {
         
     elif [ "$del_opt" == "2" ]; then
         echo "正在将该 Worker 从调度主控 (Manager) 中彻底注销..."
-        ${BIN_DIR}/tunasynctl rm-worker -w "${worker_name}" -p 14242
+        ${BIN_DIR}/tunasynctl rm-worker -w "${worker_name}"
         echo "注销成功！"
         echo "注：若为本地主 Worker，请配合执行 'systemctl stop tunasync-worker' 终止后台进程。"
     else
