@@ -270,39 +270,113 @@ function manual_sync() {
     echo "触发请求已发送。请稍后使用状态查看选项观察变化。"
 }
 
-function remove_task_or_worker() {
-    echo "================删除配置与回收资源================"
-    echo "  1) 禁用并摘除已加载的镜像任务 (Mirror)"
-    echo "  2) 从主控注销整个 Worker 节点调度"
-    read -p "请选择清理操作 [1-2]: " del_opt
-    
-    read -p "请输入相关的 Worker 名称 (敲回车使用默认: main_worker): " worker_name
-    worker_name=${worker_name:-main_worker}
-    
-    if [ "$del_opt" == "1" ]; then
-        read -p "请输入要摘除的镜像项目名称 (如 debian): " mirror_name
-        if [ -z "$mirror_name" ]; then return 1; fi
+function manage_mirror_tasks() {
+    while true; do
+        echo ""
+        echo "================ 镜像任务跟踪与管理 ================"
+        local conf_file="${CONF_DIR}/worker.conf"
+        if [ ! -f "$conf_file" ]; then
+            echo "错误: $conf_file 不存在，请先安装。环境不完整。"
+            return 1
+        fi
         
-        echo "正在从 Manager 热重载并下线 [${mirror_name}] ..."
-        ${BIN_DIR}/tunasynctl disable -w "${worker_name}" "${mirror_name}"
-        ${BIN_DIR}/tunasynctl flush
-        ${BIN_DIR}/tunasynctl reload -w "${worker_name}" 2>/dev/null
+        # 提取已配置的名称
+        local mirrors=($(grep -E '^name\s*=' "$conf_file" | grep -v 'name = "main_worker"' | awk -F'"' '{print $2}'))
         
-        echo "-------------------------------------------------------"
-        echo "[重要提示] 热配置与缓存已从内存卸载。"
-        echo "为避免服务下次重新启动时再次读到它，请务必手动编辑配置文件 :"
-        echo "      vim ${CONF_DIR}/worker.conf"
-        echo "并从中直接删除匹配 [[mirrors]] name=\"${mirror_name}\" 的上下内容段落！"
-        echo "-------------------------------------------------------"
+        if [ ${#mirrors[@]} -eq 0 ]; then
+            echo "当前未配置任何附加的镜像任务 (未发现配置列表)。"
+        else
+            echo "当前记录在脚本中的配置列表："
+            local i=1
+            for m in "${mirrors[@]}"; do
+                echo "  ${i}) $m"
+                let i++
+            done
+        fi
+        echo "-------------------------------------------"
+        echo "操作选项："
+        echo "  [s] 暂停/停止某项任务 (disable & flush)"
+        echo "  [r] 恢复/重新启动某项任务 (enable & start)"
+        echo "  [d] 彻底删除某项任务并清理配置文件"
+        echo "  [x] 注销整个 Worker 节点调度"
+        echo "  [q] 返回上级主菜单"
+        read -p "请输入您的操作 [s/r/d/x/q]: " action
         
-    elif [ "$del_opt" == "2" ]; then
-        echo "正在将该 Worker 从调度主控 (Manager) 中彻底注销..."
-        ${BIN_DIR}/tunasynctl rm-worker -w "${worker_name}"
-        echo "注销成功！"
-        echo "注：若为本地主 Worker，请配合执行 'systemctl stop tunasync-worker' 终止后台进程。"
-    else
-        echo "操作已取消。"
-    fi
+        case "$action" in
+            q|Q) return ;;
+            x|X)
+                read -p "请输入相关的 Worker 名称 (默认: main_worker): " worker_name
+                worker_name=${worker_name:-main_worker}
+                echo "正在注销 Worker [${worker_name}]..."
+                ${BIN_DIR}/tunasynctl rm-worker -w "${worker_name}"
+                echo "注销成功！(注意：本地 Worker 需要您退出后手动执行重启或卸载生效)"
+                continue
+                ;;
+            s|S|r|R|d|D)
+                if [ ${#mirrors[@]} -eq 0 ]; then
+                     echo "暂无任务可以操作，请先通过菜单 2 添加！"
+                     continue
+                fi
+                read -p "请选择相关的镜像任务序号 (1-${#mirrors[@]}): " idx
+                if ! [[ "$idx" =~ ^[0-9]+$ ]] || [ "$idx" -lt 1 ] || [ "$idx" -gt "${#mirrors[@]}" ]; then
+                    echo "无效的任务序号"
+                    continue
+                fi
+                local target_mirror="${mirrors[$((idx-1))]}"
+                local worker_name="main_worker"
+                ;;
+            *)
+                echo "无效输入"
+                continue
+                ;;
+        esac
+        
+        case "$action" in
+            s|S)
+                echo "正在停止任务 [${target_mirror}]..."
+                ${BIN_DIR}/tunasynctl disable -w "${worker_name}" "${target_mirror}" 2>/dev/null
+                ${BIN_DIR}/tunasynctl flush 2>/dev/null
+                echo "操作完成！任务已置为被禁用且从缓存刷出。"
+                ;;
+            r|R)
+                echo "正在启用并恢复任务同步 [${target_mirror}]..."
+                ${BIN_DIR}/tunasynctl enable -w "${worker_name}" "${target_mirror}" 2>/dev/null
+                ${BIN_DIR}/tunasynctl start -w "${worker_name}" "${target_mirror}" 2>/dev/null
+                echo "操作完成！任务已成功触发恢复/重启信号。"
+                ;;
+            d|D)
+                echo "1. 从系统调度中移除并停用..."
+                ${BIN_DIR}/tunasynctl disable -w "${worker_name}" "${target_mirror}" 2>/dev/null
+                ${BIN_DIR}/tunasynctl flush 2>/dev/null
+                
+                echo "2. 正在智能清理配置文件 ${conf_file}..."
+                cp "${conf_file}" "${conf_file}.bak_rm_$(date +%s)"
+                
+                # 使用 awk 对块落进行自动安全删除处理
+                awk -v target="${target_mirror}" '
+                /^\[\[mirrors\]\]|^\[global\]|^\[manager\]|^\[server\]|^\[docker\]|^\[cgroup\]/ {
+                    if ($0 ~ /^\[\[mirrors\]\]/) { block_type = "mirrors" } else { block_type = "other" }
+                    if (buf != "") { if (!delete_block) print buf; }
+                    buf = $0
+                    delete_block = 0
+                    next
+                }
+                {
+                    if (block_type == "mirrors" && $0 ~ "^name\\s*=\\s*\"" target "\"") { delete_block = 1 }
+                    if (buf != "") { buf = buf "\n" $0 } else { buf = $0 }
+                }
+                END { if (buf != "" && !delete_block) print buf; }
+                ' "${conf_file}" > "${conf_file}.tmp"
+                
+                mv "${conf_file}.tmp" "${conf_file}"
+                chown ${RUN_USER}:${RUN_GROUP} "${conf_file}"
+                
+                echo "3. 正在重新重载服务端配置使改变落地..."
+                systemctl restart tunasync-worker
+                echo "任务 [${target_mirror}] 已彻底从配置文件及后台中删除清理干净！"
+                ;;
+        esac
+    done
 }
 
 function uninstall_env() {
@@ -356,7 +430,7 @@ function show_menu() {
         echo "  2) 向 Worker 添加一个新的镜像同步任务 (Mirror)"
         echo "  3) 查看当前 Worker 与任务状态"
         echo "  4) 手动触发执行一次镜像同步活动"
-        echo "  5) 停用删除特定镜像任务 或 注销 Worker"
+        echo "  5) 列表管理现有的镜像任务 (停止/重新启动/删除/注销 Worker)"
         echo "  6) 卸载 Tunasync 并清理环境"
         echo "  0) 退出"
         echo "==========================================="
@@ -366,7 +440,7 @@ function show_menu() {
             2) add_mirror ;;
             3) manage_workers ;;
             4) manual_sync ;;
-            5) remove_task_or_worker ;;
+            5) manage_mirror_tasks ;;
             6) uninstall_env ;;
             0)
                 echo "退出，再见！"
