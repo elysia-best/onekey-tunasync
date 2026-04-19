@@ -34,6 +34,7 @@ function install_env() {
     echo "正在创建用户与目录..."
     if ! getent group "${RUN_GROUP}" >/dev/null; then groupadd "${RUN_GROUP}"; fi
     if ! getent passwd "${RUN_USER}" >/dev/null; then useradd -r -s /bin/bash -g "${RUN_GROUP}" -d "${RUN_USER_HOME}" "${RUN_USER}"; fi
+    if [ ! -d "${RUN_USER_HOME}" ]; then mkdir -p "${RUN_USER_HOME}"; chown ${RUN_USER}:${RUN_GROUP} "${RUN_USER_HOME}"; fi
     
     mkdir -p "${MIRROR_DIR}" "${LOG_DIR}" "${CONF_DIR}"
     chown -R ${RUN_USER}:${RUN_GROUP} "${MIRROR_DIR}" "${LOG_DIR}" "${CONF_DIR}"
