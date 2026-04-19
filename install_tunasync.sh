@@ -6,6 +6,7 @@
 # ================= 配置变量 =================
 RUN_USER="tuansyncer"
 RUN_GROUP="www"
+RUN_USER_HOME="/data/${RUN_USER}"
 MIRROR_DIR="/data/mirrors"
 LOG_DIR="/data/log"
 CONF_DIR="/etc/tunasync"
@@ -32,7 +33,7 @@ function install_env() {
     
     echo "正在创建用户与目录..."
     if ! getent group "${RUN_GROUP}" >/dev/null; then groupadd "${RUN_GROUP}"; fi
-    if ! getent passwd "${RUN_USER}" >/dev/null; then useradd -r -s /bin/bash -g "${RUN_GROUP}" -d "${MIRROR_DIR}" "${RUN_USER}"; fi
+    if ! getent passwd "${RUN_USER}" >/dev/null; then useradd -r -s /bin/bash -g "${RUN_GROUP}" -d "${RUN_USER_HOME}" "${RUN_USER}"; fi
     
     mkdir -p "${MIRROR_DIR}" "${LOG_DIR}" "${CONF_DIR}"
     chown -R ${RUN_USER}:${RUN_GROUP} "${MIRROR_DIR}" "${LOG_DIR}" "${CONF_DIR}"
